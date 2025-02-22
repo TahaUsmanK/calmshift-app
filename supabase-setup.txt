@@ -1,0 +1,231 @@
+CalmShift - Supabase Setup Guide
+
+1. Create a New Supabase Project
+   - Go to https://supabase.com
+   - Click "New Project"
+   - Fill in project details:
+     - Name: CalmShift
+     - Database Password: (create a secure password)
+     - Region: (choose closest to your users)
+   - Click "Create New Project"
+
+2. Get Project Credentials
+   - Go to Project Settings > API
+   - Save Project URL and anon/public key
+   - Add to .env.local:
+     NEXT_PUBLIC_SUPABASE_URL=your_project_url
+     NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+
+3. Configure Authentication
+   - Go to Authentication > Providers
+   - Enable Email auth
+   - Enable Google auth (optional):
+     - Create project in Google Cloud Console
+     - Get OAuth client ID and secret
+     - Add to Supabase configuration
+   - Add redirect URLs in URL Configuration:
+     - http://localhost:3000/auth/callback (development)
+     - https://your-domain.com/auth/callback (production)
+
+4. Set Up Database Schema
+   Open SQL Editor and run these commands in order:
+
+-- Enable UUID extension
+create extension if not exists "uuid-ossp";
+
+-- Create profiles table
+create table profiles (
+  id uuid references auth.users on delete cascade primary key,
+  username text unique,
+  avatar_url text,
+  timezone text default 'UTC',
+  daily_goal_minutes integer default 120,
+  theme text default 'light',
+  language text default 'en',
+  notification_settings jsonb default '{"daily_reminders": true, "achievement_alerts": true, "weekly_reports": true}'::jsonb,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Create detox sessions table
+create table detox_sessions (
+  id uuid default uuid_generate_v4() primary key,
+  user_id uuid references auth.users on delete cascade not null,
+  started_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  ended_at timestamp with time zone,
+  duration_minutes integer,
+  theme text,
+  completed boolean default false,
+  notes text,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Create achievements table
+create table achievements (
+  id uuid default uuid_generate_v4() primary key,
+  title text not null,
+  description text,
+  points integer default 0,
+  icon text,
+  criteria jsonb,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Create user achievements junction table
+create table user_achievements (
+  id uuid default uuid_generate_v4() primary key,
+  user_id uuid references auth.users on delete cascade not null,
+  achievement_id uuid references achievements on delete cascade not null,
+  earned_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  unique(user_id, achievement_id)
+);
+
+-- Create mindfulness activities table
+create table mindfulness_activities (
+  id uuid default uuid_generate_v4() primary key,
+  title text not null,
+  description text,
+  duration_minutes integer,
+  category text,
+  content_url text,
+  thumbnail_url text,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Create activity logs table
+create table activity_logs (
+  id uuid default uuid_generate_v4() primary key,
+  user_id uuid references auth.users on delete cascade not null,
+  activity_type text not null,
+  started_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  duration_minutes integer,
+  notes text,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Create updated_at function
+create or replace function handle_updated_at()
+returns trigger as $$
+begin
+  new.updated_at = timezone('utc'::text, now());
+  return new;
+end;
+$$ language plpgsql;
+
+-- Create triggers for updated_at
+create trigger handle_profiles_updated_at
+  before update on profiles
+  for each row
+  execute function handle_updated_at();
+
+create trigger handle_mindfulness_activities_updated_at
+  before update on mindfulness_activities
+  for each row
+  execute function handle_updated_at();
+
+-- Create function to handle new user registration
+create or replace function handle_new_user() 
+returns trigger as $$
+begin
+  insert into profiles (id)
+  values (new.id);
+  return new;
+end;
+$$ language plpgsql security definer;
+
+-- Create trigger for new user registration
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute procedure handle_new_user();
+
+-- Enable Row Level Security (RLS)
+alter table profiles enable row level security;
+alter table detox_sessions enable row level security;
+alter table user_achievements enable row level security;
+alter table activity_logs enable row level security;
+alter table mindfulness_activities enable row level security;
+
+-- Create RLS policies
+-- Profiles policies
+create policy "Users can view their own profile"
+  on profiles for select
+  using ( auth.uid() = id );
+
+create policy "Users can update their own profile"
+  on profiles for update
+  using ( auth.uid() = id );
+
+-- Detox sessions policies
+create policy "Users can view their own sessions"
+  on detox_sessions for select
+  using ( auth.uid() = user_id );
+
+create policy "Users can create their own sessions"
+  on detox_sessions for insert
+  with check ( auth.uid() = user_id );
+
+create policy "Users can update their own sessions"
+  on detox_sessions for update
+  using ( auth.uid() = user_id );
+
+-- Activity logs policies
+create policy "Users can view their own activity logs"
+  on activity_logs for select
+  using ( auth.uid() = user_id );
+
+create policy "Users can create their own activity logs"
+  on activity_logs for insert
+  with check ( auth.uid() = user_id );
+
+-- User achievements policies
+create policy "Users can view their own achievements"
+  on user_achievements for select
+  using ( auth.uid() = user_id );
+
+create policy "Users can view all achievements"
+  on achievements for select
+  to authenticated
+  using ( true );
+
+-- Mindfulness activities policies
+create policy "Users can view all mindfulness activities"
+  on mindfulness_activities for select
+  to authenticated
+  using ( true );
+
+-- Insert sample data
+-- Insert achievements
+insert into achievements (title, description, points, icon, criteria) values
+  ('Early Bird', 'Complete a detox session before 9 AM', 50, 'sun', '{"time_of_day": "before_9am"}'),
+  ('Night Owl', 'Complete a detox session after 9 PM', 50, 'moon', '{"time_of_day": "after_9pm"}'),
+  ('Week Warrior', 'Complete 7 consecutive days of detox sessions', 100, 'award', '{"streak_days": 7}'),
+  ('Digital Detox Master', 'Accumulate 24 hours of detox time', 200, 'shield', '{"total_hours": 24}'),
+  ('Mindfulness Maven', 'Complete 10 mindfulness exercises', 150, 'heart', '{"mindfulness_count": 10}');
+
+-- Insert mindfulness activities
+insert into mindfulness_activities (title, description, duration_minutes, category) values
+  ('Morning Breathing', 'Start your day with mindful breathing', 5, 'breathing'),
+  ('Body Scan', 'Progressive relaxation technique', 10, 'meditation'),
+  ('Walking Meditation', 'Mindful walking exercise', 15, 'movement'),
+  ('Gratitude Practice', 'Focus on what you''re thankful for', 5, 'reflection'),
+  ('Evening Wind Down', 'Prepare for restful sleep', 10, 'relaxation');
+
+5. Verify Setup
+   - Test authentication flow
+   - Check RLS policies are working
+   - Verify data relationships
+   - Test API endpoints
+
+6. Additional Configuration
+   - Set up storage buckets if needed
+   - Configure email templates
+   - Set up Edge Functions if required
+   - Configure backup settings
+
+7. Development Tips
+   - Use Supabase CLI for local development
+   - Enable GitHub integration for backups
+   - Set up monitoring and alerts
+   - Keep security policies up to date
+
